@@ -1,6 +1,6 @@
 [package]
-name = "ramarivera-rtk"
-version = "0.42.3-ramarivera.1"
+name = "rr-rtk"
+version = "0.42.3-rr.1"
 edition = "2021"
 rust-version = "1.91"
 authors = ["Ramiro Rivera"]
@@ -59,12 +59,12 @@ extended-description = "rtk filters and compresses command outputs before they r
 section = "utility"
 priority = "optional"
 assets = [
-    ["target/release/ramarivera-rtk", "usr/bin/", "755"],
+    ["target/release/rr-rtk", "usr/bin/", "755"],
 ]
 # cargo-generate-rpm configuration
 [package.metadata.generate-rpm]
 assets = [
-    { source = "target/release/ramarivera-rtk", dest = "/usr/bin/ramarivera-rtk", mode = "755" },
+    { source = "target/release/rr-rtk", dest = "/usr/bin/rr-rtk", mode = "755" },
 ]
 
 [lints.rust]

@@ -18,25 +18,25 @@ if ! command -v jq &>/dev/null; then
   exit 0
 fi
 
-if ! command -v rtk &>/dev/null; then
-  echo "[rtk] WARNING: rtk is not installed or not in PATH. Hook cannot rewrite commands. Install: https://github.com/rtk-ai/rtk#installation" >&2
+if ! command -v rr-rtk &>/dev/null; then
+  echo "[rtk] WARNING: rr-rtk is not installed or not in PATH. Hook cannot rewrite commands. Install: cargo install --locked rr-rtk" >&2
   exit 0
 fi
 
-# Version guard: rtk rewrite was added in 0.23.0.
+# Version guard: rr-rtk rewrite was added in 0.23.0.
 # Older binaries: warn once and exit cleanly (no silent failure).
 # Cache the version check to avoid spawning multiple processes on every hook call.
 CACHE_DIR=${XDG_CACHE_HOME:-$HOME/.cache}
 CACHE_FILE="$CACHE_DIR/rtk-hook-version-ok"
 if [ ! -f "$CACHE_FILE" ]; then
-  RTK_VERSION_RAW=$(rtk --version 2>/dev/null)
-  RTK_VERSION=${RTK_VERSION_RAW#rtk }
+  RTK_VERSION_RAW=$(rr-rtk --version 2>/dev/null)
+  RTK_VERSION=${RTK_VERSION_RAW#rr-rtk }
   RTK_VERSION=${RTK_VERSION%% *}
   if [ -n "$RTK_VERSION" ]; then
     IFS=. read -r MAJOR MINOR PATCH <<<"$RTK_VERSION"
     # Require >= 0.23.0
     if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 23 ]; then
-      echo "[rtk] WARNING: rtk $RTK_VERSION is too old (need >= 0.23.0). Upgrade: cargo install rtk" >&2
+      echo "[rtk] WARNING: rr-rtk $RTK_VERSION is too old (need >= 0.23.0). Upgrade: cargo install --locked rr-rtk" >&2
       exit 0
     fi
   fi
@@ -52,7 +52,7 @@ if [ -z "$CMD" ]; then
 fi
 
 # Delegate all rewrite + permission logic to the Rust binary.
-REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null)
+REWRITTEN=$(rr-rtk rewrite "$CMD" 2>/dev/null)
 EXIT_CODE=$?
 
 case $EXIT_CODE in

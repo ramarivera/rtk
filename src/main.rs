@@ -53,9 +53,9 @@ pub enum AgentTarget {
 
 #[derive(Parser)]
 #[command(
-    name = "ramarivera-rtk",
+    name = "rr-rtk",
     version,
-    about = "Rust Token Killer - Minimize LLM token consumption (ramarivera personal fork)",
+    about = "Rust Token Killer - Minimize LLM token consumption (rr personal fork)",
     long_about = "A high-performance CLI proxy designed to filter and summarize system outputs before they reach your LLM context. Personal fork of rtk-ai/rtk; pre-release until upstream PR lands."
 )]
 struct Cli {

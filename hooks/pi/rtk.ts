@@ -1,11 +1,11 @@
-// RTK Pi extension — rewrites bash commands to use rtk for token savings.
-// Requires: rtk >= 0.23.0 in PATH.
+// RTK Pi extension — rewrites bash commands to use rr-rtk for token savings.
+// Requires: rr-rtk (the personal rtk fork) >= 0.23.0 in PATH.
 //
-// This is a thin delegating extension: all rewrite logic lives in `rtk rewrite`,
+// This is a thin delegating extension: all rewrite logic lives in `rr-rtk rewrite`,
 // which is the single source of truth (src/discover/registry.rs).
 // To add or change rewrite rules, edit the Rust registry — not this file.
 //
-// Exit code contract for `rtk rewrite`:
+// Exit code contract for `rr-rtk rewrite`:
 //   0 + stdout  Rewrite found → mutate command
 //   1           No RTK equivalent → pass through unchanged
 //   3 + stdout  Rewrite (advisory) → mutate command
@@ -23,13 +23,13 @@ function parseSemver(raw: string): [number, number, number] | null {
   return [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)]
 }
 
-// Calls `rtk rewrite`; returns the rewritten command or null (pass through).
+// Calls `rr-rtk rewrite`; returns the rewritten command or null (pass through).
 async function rewriteCommand(
   pi: ExtensionAPI,
   cmd: string,
   signal?: AbortSignal
 ): Promise<string | null> {
-  const result = await pi.exec("rtk", ["rewrite", cmd], {
+  const result = await pi.exec("rr-rtk", ["rewrite", cmd], {
     timeout: REWRITE_TIMEOUT_MS,
     signal,
   })
@@ -40,18 +40,18 @@ async function rewriteCommand(
 
 export default async function (pi: ExtensionAPI) {
   // Probe rtk version at load time; disables extension if missing or too old.
-  const ver = await pi.exec("rtk", ["--version"], { timeout: REWRITE_TIMEOUT_MS })
+  const ver = await pi.exec("rr-rtk", ["--version"], { timeout: REWRITE_TIMEOUT_MS })
   if (ver.code !== 0) {
-    console.warn("[rtk] rtk binary not found in PATH — extension disabled")
+    console.warn("[rtk] rr-rtk binary not found in PATH — extension disabled")
     return
   }
 
   // Warn and bail if rtk predates 0.23.0 (when `rtk rewrite` was introduced).
-  const parsed = parseSemver(ver.stdout.replace(/^rtk\s+/, ""))
+  const parsed = parseSemver(ver.stdout.replace(/^rr-rtk\s+/, ""))
   if (parsed) {
     const [major, minor] = parsed
     if (major === 0 && minor < MIN_SUPPORTED_RTK_MINOR) {
-      console.warn(`[rtk] rtk ${ver.stdout.trim()} is too old (need >= 0.23.0) — extension disabled`)
+      console.warn(`[rtk] rr-rtk ${ver.stdout.trim()} is too old (need >= 0.23.0) — extension disabled`)
       return
     }
   }
@@ -63,7 +63,7 @@ export default async function (pi: ExtensionAPI) {
       const cmd = event.input.command
       if (typeof cmd !== "string" || cmd.trim() === "") return
 
-      if (cmd.startsWith("rtk ")) return
+      if (cmd.startsWith("rr-rtk ")) return
       if (process.env.RTK_DISABLED === "1") return
 
       // Delegate to RTK.
