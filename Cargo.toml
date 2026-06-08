@@ -1,13 +1,13 @@
 [package]
-name = "rtk"
-version = "0.42.2"
+name = "ramarivera-rtk"
+version = "0.42.3-ramarivera.1"
 edition = "2021"
 rust-version = "1.91"
-authors = ["Patrick Szymkowiak"]
-description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
+authors = ["Ramiro Rivera"]
+description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption (personal fork of rtk-ai/rtk, pre-release until upstream PR lands)"
 license = "Apache 2.0"
-homepage = "https://www.rtk-ai.app"
-repository = "https://github.com/rtk-ai/rtk"
+homepage = "https://github.com/ramarivera/rtk"
+repository = "https://github.com/ramarivera/rtk"
 readme = "README.md"
 keywords = ["cli", "llm", "token", "filter", "productivity"]
 categories = ["command-line-utilities", "development-tools"]
@@ -52,19 +52,19 @@ strip = true
 
 # cargo-deb configuration
 [package.metadata.deb]
-maintainer = "Patrick Szymkowiak"
-copyright = "2024 Patrick Szymkowiak"
+maintainer = "Ramiro Rivera"
+copyright = "2024 Ramiro Rivera"
 license-file = ["LICENSE", "0"]
 extended-description = "rtk filters and compresses command outputs before they reach your LLM context, saving 60-90% of tokens."
 section = "utility"
 priority = "optional"
 assets = [
-    ["target/release/rtk", "usr/bin/", "755"],
+    ["target/release/ramarivera-rtk", "usr/bin/", "755"],
 ]
 # cargo-generate-rpm configuration
 [package.metadata.generate-rpm]
 assets = [
-    { source = "target/release/rtk", dest = "/usr/bin/rtk", mode = "755" },
+    { source = "target/release/ramarivera-rtk", dest = "/usr/bin/ramarivera-rtk", mode = "755" },
 ]
 
 [lints.rust]
