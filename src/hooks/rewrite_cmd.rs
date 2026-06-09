@@ -22,18 +22,111 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
 
     match evaluate(cmd, &excluded, &transparent_prefixes) {
         RewriteOutcome::Allow(rewritten) => {
-            print!("{}", rewritten);
+            print!(
+                "{}",
+                rewrite_for_invoked_binary(&rewritten, &invoked_binary_name())
+            );
             let _ = std::io::stdout().flush();
             Ok(())
         }
         RewriteOutcome::Ask(rewritten) => {
-            print!("{}", rewritten);
+            print!(
+                "{}",
+                rewrite_for_invoked_binary(&rewritten, &invoked_binary_name())
+            );
             let _ = std::io::stdout().flush();
             std::process::exit(3);
         }
         RewriteOutcome::Deny => std::process::exit(2),
         RewriteOutcome::Passthrough => std::process::exit(1),
     }
+}
+
+fn invoked_binary_name() -> String {
+    let runtime_name = std::env::args_os()
+        .next()
+        .as_ref()
+        .and_then(|path| std::path::Path::new(path).file_stem())
+        .map(|name| name.to_string_lossy().into_owned())
+        .or_else(|| {
+            std::env::current_exe().ok().and_then(|path| {
+                path.file_stem()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "rtk".to_string());
+
+    let package_name = env!("CARGO_PKG_NAME");
+    if runtime_name == "rtk" && package_name != "rtk" {
+        package_name.to_string()
+    } else {
+        runtime_name
+    }
+}
+
+fn rewrite_for_invoked_binary(rewritten: &str, binary_name: &str) -> String {
+    if binary_name == "rtk" {
+        return rewritten.to_string();
+    }
+
+    let tokens = crate::discover::lexer::tokenize(rewritten);
+    let mut output = String::with_capacity(rewritten.len() + binary_name.len());
+    let mut cursor = 0;
+    let mut expect_command = true;
+
+    for token in tokens {
+        if token.offset < cursor {
+            continue;
+        }
+        output.push_str(&rewritten[cursor..token.offset]);
+
+        match token.kind {
+            crate::discover::lexer::TokenKind::Operator
+            | crate::discover::lexer::TokenKind::Pipe => {
+                output.push_str(&token.value);
+                expect_command = true;
+            }
+            crate::discover::lexer::TokenKind::Shellism if token.value == "&" => {
+                output.push_str(&token.value);
+                expect_command = true;
+            }
+            crate::discover::lexer::TokenKind::Arg if expect_command && token.value == "rtk" => {
+                output.push_str(binary_name);
+                expect_command = false;
+            }
+            crate::discover::lexer::TokenKind::Arg if expect_command => {
+                output.push_str(&token.value);
+                if !is_env_assignment(&token.value) && !is_shell_prefix_builtin(&token.value) {
+                    expect_command = false;
+                }
+            }
+            _ => output.push_str(&token.value),
+        }
+
+        cursor = token.offset + token.value.len();
+    }
+
+    output.push_str(&rewritten[cursor..]);
+    output
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && !name.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+}
+
+fn is_shell_prefix_builtin(token: &str) -> bool {
+    matches!(
+        token,
+        "noglob" | "command" | "builtin" | "exec" | "nocorrect"
+    )
 }
 
 #[derive(Debug, PartialEq)]
@@ -87,6 +180,38 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("rtk git status"),
             Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_for_invoked_binary_uses_renamed_binary() {
+        assert_eq!(
+            rewrite_for_invoked_binary("rtk git status --short", "rr-rtk"),
+            "rr-rtk git status --short"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_for_invoked_binary_updates_compound_segments() {
+        assert_eq!(
+            rewrite_for_invoked_binary("rtk cargo test && rtk git status", "rr-rtk"),
+            "rr-rtk cargo test && rr-rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_for_invoked_binary_preserves_rtk_arguments() {
+        assert_eq!(
+            rewrite_for_invoked_binary("rtk cargo install rtk", "rr-rtk"),
+            "rr-rtk cargo install rtk"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_for_invoked_binary_handles_env_and_shell_prefixes() {
+        assert_eq!(
+            rewrite_for_invoked_binary("FOO=1 command rtk git status", "rr-rtk"),
+            "FOO=1 command rr-rtk git status"
         );
     }
 
