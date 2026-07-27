@@ -1,5 +1,6 @@
 //! Filters find results by grouping files by directory.
 
+use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
@@ -26,7 +27,7 @@ fn glob_match_inner(pat: &[u8], name: &[u8]) -> bool {
 }
 
 /// Parsed arguments from either native find or RTK find syntax.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct FindArgs {
     pattern: String,
     path: String,
@@ -75,26 +76,88 @@ fn has_unsupported_find_flags(args: &[String]) -> bool {
         .any(|a| UNSUPPORTED_FIND_FLAGS.contains(&a.as_str()))
 }
 
+/// Native find flags RTK models faithfully. Anything else means RTK cannot
+/// reproduce find's semantics and must step aside.
+const SUPPORTED_NATIVE_FIND_FLAGS: &[&str] = &["-name", "-iname", "-type", "-maxdepth", "-print"];
+
+/// Does this native-syntax invocation contain a flag RTK does not model?
+///
+/// Fail-safe rule: an unrecognised flag is never "ignored". Ignoring it either
+/// widens or narrows the result set silently, which is worse than not filtering
+/// at all — the caller gets a confident wrong answer with exit code 0.
+fn has_unmodelled_native_flag(args: &[String]) -> bool {
+    let mut i = 0;
+    // A leading path is positional, not a flag.
+    if args.first().is_some_and(|a| !a.starts_with('-')) {
+        i = 1;
+    }
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg.starts_with('-') {
+            if !SUPPORTED_NATIVE_FIND_FLAGS.contains(&arg) {
+                return true;
+            }
+            // Skip the value belonging to a value-taking flag.
+            if arg != "-print" {
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// What RTK decided to do with a `find` invocation.
+#[derive(Debug, PartialEq)]
+enum FindPlan {
+    /// RTK fully understands these args and may filter the output.
+    Rtk(Box<FindArgs>),
+    /// RTK does not fully model these args — run the real `find` verbatim.
+    Passthrough,
+}
+
 /// Parse arguments from raw args vec, supporting both native find and RTK syntax.
 ///
 /// Native find syntax: `find . -name "*.rs" -type f -maxdepth 3`
 /// RTK syntax: `find *.rs [path] [-m max] [-t type]`
-fn parse_find_args(args: &[String]) -> Result<FindArgs> {
+///
+/// Returns [`FindPlan::Passthrough`] rather than erroring whenever the args
+/// contain anything RTK cannot reproduce exactly.
+fn parse_find_args(args: &[String]) -> Result<FindPlan> {
     if args.is_empty() {
-        return Ok(FindArgs::default());
+        return Ok(FindPlan::Rtk(Box::default()));
     }
 
     if has_unsupported_find_flags(args) {
-        anyhow::bail!(
-            "rtk find does not support compound predicates or actions (e.g. -not, -exec). Use `find` directly."
-        );
+        return Ok(FindPlan::Passthrough);
     }
 
     if has_native_find_flags(args) {
-        parse_native_find_args(args)
+        if has_unmodelled_native_flag(args) {
+            return Ok(FindPlan::Passthrough);
+        }
+        parse_native_find_args(args).map(|a| FindPlan::Rtk(Box::new(a)))
+    } else if args.iter().any(|a| {
+        a.starts_with('-') && !matches!(a.as_str(), "-m" | "--max" | "-t" | "--file-type")
+    }) {
+        // RTK syntax with a flag we do not own — hand it back to real find.
+        Ok(FindPlan::Passthrough)
     } else {
-        parse_rtk_find_args(args)
+        parse_rtk_find_args(args).map(|a| FindPlan::Rtk(Box::new(a)))
     }
+}
+
+/// Run the real `find` with the caller's arguments untouched, forwarding its
+/// exit status. This is the fail-safe path: no filtering, no rewriting.
+fn passthrough_to_find(args: &[String]) -> Result<()> {
+    let status = std::process::Command::new("find")
+        .args(args)
+        .status()
+        .context("failed to execute `find`")?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
 }
 
 /// Parse native find syntax: `find [path] -name "*.rs" -type f -maxdepth 3`
@@ -131,9 +194,7 @@ fn parse_native_find_args(args: &[String]) -> Result<FindArgs> {
                     parsed.max_depth = Some(val.parse().context("invalid -maxdepth value")?);
                 }
             }
-            flag if flag.starts_with('-') => {
-                eprintln!("rtk find: unknown flag '{}', ignored", flag);
-            }
+            "-print" => {}
             _ => {}
         }
         i += 1;
@@ -178,7 +239,10 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
 
 /// Entry point from main.rs — parses raw args then delegates to run().
 pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
-    let parsed = parse_find_args(args)?;
+    let parsed = match parse_find_args(args)? {
+        FindPlan::Passthrough => return passthrough_to_find(args),
+        FindPlan::Rtk(parsed) => *parsed,
+    };
     run(
         &parsed.pattern,
         &parsed.path,
@@ -278,13 +342,11 @@ pub fn run(
     let raw_output = files.join("\n");
 
     if files.is_empty() {
-        let msg = format!("0 for '{}'", effective_pattern);
-        println!("{}", msg);
         timer.track(
             &format!("find {} -name '{}'", path, effective_pattern),
             "rtk find",
             &raw_output,
-            &msg,
+            "",
         );
         return Ok(());
     }
@@ -311,13 +373,14 @@ pub fn run(
     let dirs_count = dirs.len();
     let total_files = files.len();
 
-    println!("{}F {}D:", total_files, dirs_count);
-    println!();
+    let mut body = String::new();
+    body.push_str(&format!("{}F {}D:\n", total_files, dirs_count));
+    body.push('\n');
 
     // Display with proper --max limiting (count individual files)
-    let mut shown = 0;
+    let mut displayed = 0;
     for dir in &dirs {
-        if shown >= max_results {
+        if displayed >= max_results {
             break;
         }
 
@@ -328,10 +391,10 @@ pub fn run(
             dir.clone()
         };
 
-        let remaining_budget = max_results - shown;
+        let remaining_budget = max_results - displayed;
         if files_in_dir.len() <= remaining_budget {
-            println!("{}/ {}", dir_display, files_in_dir.join(" "));
-            shown += files_in_dir.len();
+            body.push_str(&format!("{}/ {}\n", dir_display, files_in_dir.join(" ")));
+            displayed += files_in_dir.len();
         } else {
             // Partial display: show only what fits in budget
             let partial: Vec<_> = files_in_dir
@@ -339,14 +402,14 @@ pub fn run(
                 .take(remaining_budget)
                 .cloned()
                 .collect();
-            println!("{}/ {}", dir_display, partial.join(" "));
-            shown += partial.len();
+            body.push_str(&format!("{}/ {}\n", dir_display, partial.join(" ")));
+            displayed += partial.len();
             break;
         }
     }
 
-    if shown < total_files {
-        println!("+{} more", total_files - shown);
+    if displayed < total_files {
+        body.push_str(&format!("+{} more\n", total_files - displayed));
     }
 
     // Extension summary
@@ -359,9 +422,8 @@ pub fn run(
         *by_ext.entry(ext).or_default() += 1;
     }
 
-    let mut ext_line = String::new();
     if by_ext.len() > 1 {
-        println!();
+        body.push('\n');
         let mut exts: Vec<_> = by_ext.iter().collect();
         exts.sort_by(|a, b| b.1.cmp(a.1));
         let ext_str: Vec<String> = exts
@@ -369,16 +431,17 @@ pub fn run(
             .take(5)
             .map(|(e, c)| format!(".{}({})", e, c))
             .collect();
-        ext_line = format!("ext: {}", ext_str.join(" "));
-        println!("{}", ext_line);
+        let ext_line = format!("ext: {}", ext_str.join(" "));
+        body.push_str(&format!("{}\n", ext_line));
     }
 
-    let rtk_output = format!("{}F {}D + {}", total_files, dirs_count, ext_line);
+    let shown = never_worse(&raw_output, &body);
+    print!("{}", shown);
     timer.track(
         &format!("find {} -name '{}'", path, effective_pattern),
         "rtk find",
         &raw_output,
-        &rtk_output,
+        shown,
     );
 
     Ok(())
@@ -438,11 +501,19 @@ mod tests {
         assert_eq!(effective, "*");
     }
 
+    /// Assert RTK chose to handle these args, and hand back what it parsed.
+    fn parse_rtk_plan(args: &[String]) -> Result<FindArgs> {
+        match parse_find_args(args)? {
+            FindPlan::Rtk(parsed) => Ok(*parsed),
+            FindPlan::Passthrough => panic!("expected RTK to handle {args:?}, got passthrough"),
+        }
+    }
+
     // --- parse_find_args: native find syntax ---
 
     #[test]
     fn parse_native_find_name() {
-        let parsed = parse_find_args(&args(&[".", "-name", "*.rs"])).unwrap();
+        let parsed = parse_rtk_plan(&args(&[".", "-name", "*.rs"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
         assert_eq!(parsed.path, ".");
         assert_eq!(parsed.file_type, "f");
@@ -451,7 +522,7 @@ mod tests {
 
     #[test]
     fn parse_native_find_name_and_type() {
-        let parsed = parse_find_args(&args(&["src", "-name", "*.rs", "-type", "f"])).unwrap();
+        let parsed = parse_rtk_plan(&args(&["src", "-name", "*.rs", "-type", "f"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
         assert_eq!(parsed.path, "src");
         assert_eq!(parsed.file_type, "f");
@@ -459,14 +530,14 @@ mod tests {
 
     #[test]
     fn parse_native_find_type_d() {
-        let parsed = parse_find_args(&args(&[".", "-type", "d"])).unwrap();
+        let parsed = parse_rtk_plan(&args(&[".", "-type", "d"])).unwrap();
         assert_eq!(parsed.pattern, "*");
         assert_eq!(parsed.file_type, "d");
     }
 
     #[test]
     fn parse_native_find_maxdepth() {
-        let parsed = parse_find_args(&args(&[".", "-name", "*.toml", "-maxdepth", "2"])).unwrap();
+        let parsed = parse_rtk_plan(&args(&[".", "-name", "*.toml", "-maxdepth", "2"])).unwrap();
         assert_eq!(parsed.pattern, "*.toml");
         assert_eq!(parsed.max_depth, Some(2));
         assert_eq!(parsed.max_results, 50); // max_results unchanged by -maxdepth
@@ -474,60 +545,106 @@ mod tests {
 
     #[test]
     fn parse_native_find_iname() {
-        let parsed = parse_find_args(&args(&[".", "-iname", "Makefile"])).unwrap();
+        let parsed = parse_rtk_plan(&args(&[".", "-iname", "Makefile"])).unwrap();
         assert_eq!(parsed.pattern, "Makefile");
         assert!(parsed.case_insensitive);
     }
 
     #[test]
     fn parse_native_find_name_is_case_sensitive() {
-        let parsed = parse_find_args(&args(&[".", "-name", "*.rs"])).unwrap();
+        let parsed = parse_rtk_plan(&args(&[".", "-name", "*.rs"])).unwrap();
         assert!(!parsed.case_insensitive);
     }
 
     #[test]
     fn parse_native_find_no_path() {
         // `find -name "*.rs"` without explicit path defaults to "."
-        let parsed = parse_find_args(&args(&["-name", "*.rs"])).unwrap();
+        let parsed = parse_rtk_plan(&args(&["-name", "*.rs"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
         assert_eq!(parsed.path, ".");
     }
 
-    // --- parse_find_args: unsupported flags ---
+    // --- parse_find_args: fail-safe passthrough ---
+    //
+    // The contract: anything RTK does not fully model must produce
+    // `FindPlan::Passthrough` so the real `find` runs verbatim. It must never
+    // produce a partially-parsed plan (silent wrong answer) and never an error
+    // (a command the caller cannot run).
 
     #[test]
-    fn parse_native_find_rejects_not() {
-        let result = parse_find_args(&args(&[".", "-name", "*.rs", "-not", "-name", "*_test.rs"]));
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("compound predicates"));
+    fn compound_predicate_not_falls_back_to_passthrough() {
+        let plan =
+            parse_find_args(&args(&[".", "-name", "*.rs", "-not", "-name", "*_test.rs"])).unwrap();
+        assert_eq!(plan, FindPlan::Passthrough);
     }
 
     #[test]
-    fn parse_native_find_rejects_exec() {
-        let result = parse_find_args(&args(&[".", "-name", "*.tmp", "-exec", "rm", "{}", ";"]));
-        assert!(result.is_err());
+    fn action_exec_falls_back_to_passthrough() {
+        let plan = parse_find_args(&args(&[".", "-name", "*.tmp", "-exec", "rm", "{}", ";"])).unwrap();
+        assert_eq!(plan, FindPlan::Passthrough);
+    }
+
+    /// Regression: an unknown flag used to be printed as a warning and then
+    /// *ignored*, so `find . --bogus` returned a full result set with exit 0
+    /// while real find exited 1. Unknown flags must now yield passthrough.
+    #[test]
+    fn unknown_flag_falls_back_to_passthrough_not_mangled_command() {
+        assert_eq!(
+            parse_find_args(&args(&[".", "--bogus"])).unwrap(),
+            FindPlan::Passthrough
+        );
+        assert_eq!(
+            parse_find_args(&args(&[".", "-name", "*.rs", "--totally-made-up"])).unwrap(),
+            FindPlan::Passthrough
+        );
+    }
+
+    /// Unmodelled time/size predicates must pass through rather than erroring
+    /// with "use `find` directly" — that failure mode simply breaks the caller.
+    #[test]
+    fn unmodelled_predicates_pass_through_instead_of_erroring() {
+        for extra in [
+            vec![".", "-newer", "a.toml"],
+            vec![".", "-size", "+1k"],
+            vec![".", "-mtime", "-1"],
+            vec![".", "-perm", "644"],
+            vec![".", "-regex", ".*rs"],
+        ] {
+            let plan = parse_find_args(&args(&extra)).unwrap();
+            assert_eq!(plan, FindPlan::Passthrough, "args {extra:?} should pass through");
+        }
+    }
+
+    /// The modelled subset must still be handled by RTK — the fail-safe must
+    /// not be so broad that it disables filtering entirely.
+    #[test]
+    fn modelled_flags_still_handled_by_rtk() {
+        let parsed = parse_rtk_plan(&args(&[".", "-name", "*.rs", "-type", "f", "-maxdepth", "3"]))
+            .unwrap();
+        assert_eq!(parsed.pattern, "*.rs");
+        assert_eq!(parsed.file_type, "f");
+        assert_eq!(parsed.max_depth, Some(3));
     }
 
     // --- parse_find_args: RTK syntax ---
 
     #[test]
     fn parse_rtk_syntax_pattern_only() {
-        let parsed = parse_find_args(&args(&["*.rs"])).unwrap();
+        let parsed = parse_rtk_plan(&args(&["*.rs"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
         assert_eq!(parsed.path, ".");
     }
 
     #[test]
     fn parse_rtk_syntax_pattern_and_path() {
-        let parsed = parse_find_args(&args(&["*.rs", "src"])).unwrap();
+        let parsed = parse_rtk_plan(&args(&["*.rs", "src"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
         assert_eq!(parsed.path, "src");
     }
 
     #[test]
     fn parse_rtk_syntax_with_flags() {
-        let parsed = parse_find_args(&args(&["*.rs", "src", "-m", "10", "-t", "d"])).unwrap();
+        let parsed = parse_rtk_plan(&args(&["*.rs", "src", "-m", "10", "-t", "d"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
         assert_eq!(parsed.path, "src");
         assert_eq!(parsed.max_results, 10);
@@ -536,7 +653,7 @@ mod tests {
 
     #[test]
     fn parse_empty_args() {
-        let parsed = parse_find_args(&args(&[])).unwrap();
+        let parsed = parse_rtk_plan(&args(&[])).unwrap();
         assert_eq!(parsed.pattern, "*");
         assert_eq!(parsed.path, ".");
     }

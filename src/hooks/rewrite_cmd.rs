@@ -83,7 +83,7 @@ fn rewrite_for_invoked_binary(rewritten: &str, binary_name: &str) -> String {
 
         match token.kind {
             crate::discover::lexer::TokenKind::Operator
-            | crate::discover::lexer::TokenKind::Pipe => {
+            | crate::discover::lexer::TokenKind::Pipe(_) => {
                 output.push_str(&token.value);
                 expect_command = true;
             }
@@ -218,6 +218,25 @@ mod tests {
     mod unattestable_passthrough {
         use super::super::{evaluate, RewriteOutcome};
 
+        /// `evaluate` consults the host's Claude permission rules, so a developer
+        /// whose real settings already allow `git status` would otherwise see
+        /// `Allow` where these tests expect `Ask`. Pin the lookup at an empty
+        /// config directory so the outcome depends only on the code under test.
+        fn with_empty_claude_config<T>(f: impl FnOnce() -> T) -> T {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let orig = std::env::var_os("CLAUDE_CONFIG_DIR");
+            std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+            let out = f();
+            match orig {
+                Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+            out
+        }
+
         #[test]
         fn test_backtick_substitution_passthrough() {
             assert_eq!(
@@ -252,18 +271,14 @@ mod tests {
 
         #[test]
         fn test_fd_dup_redirect_still_rewrites() {
-            assert!(matches!(
-                evaluate("git status 2>&1", &[], &[]),
-                RewriteOutcome::Ask(_)
-            ));
+            let outcome = with_empty_claude_config(|| evaluate("git status 2>&1", &[], &[]));
+            assert!(matches!(outcome, RewriteOutcome::Ask(_)), "got {outcome:?}");
         }
 
         #[test]
         fn test_plain_command_still_rewrites() {
-            assert!(matches!(
-                evaluate("git status", &[], &[]),
-                RewriteOutcome::Ask(_)
-            ));
+            let outcome = with_empty_claude_config(|| evaluate("git status", &[], &[]));
+            assert!(matches!(outcome, RewriteOutcome::Ask(_)), "got {outcome:?}");
         }
     }
 
