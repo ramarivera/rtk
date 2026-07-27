@@ -58,6 +58,16 @@ where
 fn docker_ps(_verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
+    // Deliberate double invocation: this plain run is the honest `never_worse`
+    // baseline, the `--format` run below is what we actually show. Measured at
+    // ~100ms extra per call (local daemon socket, read-only, idempotent).
+    //
+    // Do not "optimise" this away by reconstructing the plain table from the
+    // formatted output: that means reimplementing docker's column widths and
+    // padding, and the baseline would then be RTK's guess rather than what the
+    // user would really have seen — which is precisely what the savings figure
+    // and the never-worse guard exist to measure. A wrong baseline is worse
+    // than a slow one.
     let base = exec_capture(resolved_command("docker").args(["ps"]))
         .context("Failed to run docker ps")?;
     if !base.success() {
