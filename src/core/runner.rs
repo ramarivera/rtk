@@ -122,6 +122,16 @@ where
         return Ok(exit_code);
     }
 
+    // `filter_stdout_only` captures stderr so it stays out of the filtered
+    // output — but it was then dropped entirely, so a tool that failed with a
+    // message (`wc --bogus` → "wc: illegal option") printed *nothing* and exited
+    // non-zero. A silent failure is the worst diagnostic there is; surface the
+    // tool's own words whenever it failed. Success keeps stderr suppressed so
+    // progress chatter does not eat the token savings.
+    if opts.filter_stdout_only && exit_code != 0 && !result.raw_stderr.trim().is_empty() {
+        eprint!("{}", result.raw_stderr);
+    }
+
     let text_to_filter = if opts.filter_stdout_only {
         raw_stdout
     } else {
