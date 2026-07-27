@@ -119,9 +119,44 @@ original command is passed through untouched:
 2. **`[hooks] exclude_commands`** — regex (patterns starting with `^`) or prefix match against the command with env prefixes stripped.
 3. **Per-command fail-safe** — RTK declines any invocation it cannot reproduce exactly (see below).
 
-Reach for `exclude_commands` before `RTK_DISABLED=1`. Excluding one command
-(`exclude_commands = ["rg"]`) keeps every other saving; `RTK_DISABLED=1`
-throws all of them away.
+**Reach for `exclude_commands` before `RTK_DISABLED=1`.** This is the single
+most important line on this page. Excluding one command keeps every other
+saving:
+
+```toml
+[hooks]
+exclude_commands = ["rg"]     # rg untouched; git, grep, cargo, … still filtered
+```
+
+`RTK_DISABLED=1` throws all of them away. If one rewrite misbehaves, narrow —
+do not switch RTK off wholesale. Every diagnostic RTK prints points back here
+for exactly this reason.
+
+### When a tool rejects your flag
+
+RTK runs the tool you named and never substitutes one for another: `rtk grep`
+runs grep, `rtk rg` runs ripgrep. Their flag vocabularies overlap but are not
+the same, so a ripgrep flag typed at `rtk grep` makes *grep* fail:
+
+```console
+$ rtk grep -ln "pattern" --glob '*.toml' .
+grep: unrecognized option `--glob'
+usage: grep [-abcdDEFGHhIiJLlMmnOopqRSsUVvwXxZz] [-A num] ...
+[rtk] '--glob' is a ripgrep flag; 'rtk grep' runs grep. Use 'rtk rg --glob ...' instead.
+[rtk] Or stay in 'grep' and use: --include=<pattern> / --exclude=<pattern>
+[rtk] rtk did not alter your flags. To stop rtk wrapping this one command,
+      add exclude_commands = ["grep"] to config.toml — you do not need RTK_DISABLED=1.
+```
+
+The tool's own error and exit code are always preserved — RTK only appends the
+`[rtk]`-prefixed lines. The hint works in both directions: a grep-only flag such
+as `--include` typed at `rtk rg` gets the mirror-image advice. A flag belonging
+to neither tool is not misattributed; RTK just confirms the tool rejected it and
+that RTK did not alter your arguments.
+
+A failing tool also never fails *silently*: if a wrapped command exits non-zero
+with a message, RTK surfaces that message verbatim even when it otherwise
+filters only stdout.
 
 ### Fail-safe passthrough
 
