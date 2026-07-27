@@ -3988,6 +3988,42 @@ mod tests {
         );
     }
 
+    /// Granular opt-out: a user who dislikes one rewrite must be able to
+    /// disable exactly that command via `[hooks] exclude_commands`, without
+    /// resorting to RTK_DISABLED=1 (which throws away every other saving).
+    #[test]
+    fn test_exclude_rg_only_keeps_every_other_rewrite() {
+        let excluded = vec!["rg".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --glob '*.toml' pattern .", &excluded),
+            None,
+            "rg must be left alone when excluded"
+        );
+        // grep and git keep saving tokens.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rn pattern .", &excluded),
+            Some("rtk grep -rn pattern .".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git status", &excluded),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_exclude_supports_regex_scoping_a_single_flag_form() {
+        // Anchored regex: only the --glob form of rg opts out.
+        let excluded = vec![r"^rg\b.*--glob".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --glob '*.toml' pattern .", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("rg pattern .", &excluded),
+            Some("rtk rg pattern .".into())
+        );
+    }
+
     #[test]
     fn test_rewrite_exclude_does_not_affect_other_commands() {
         let excluded = vec!["curl".to_string()];
