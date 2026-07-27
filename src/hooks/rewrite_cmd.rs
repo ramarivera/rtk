@@ -83,7 +83,7 @@ fn rewrite_for_invoked_binary(rewritten: &str, binary_name: &str) -> String {
 
         match token.kind {
             crate::discover::lexer::TokenKind::Operator
-            | crate::discover::lexer::TokenKind::Pipe => {
+            | crate::discover::lexer::TokenKind::Pipe(_) => {
                 output.push_str(&token.value);
                 expect_command = true;
             }
