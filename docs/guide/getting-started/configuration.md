@@ -110,6 +110,40 @@ Or for a single invocation:
 RTK_DISABLED=1 git rebase main
 ```
 
+### Precedence
+
+Checks run in this order; the first one that says "don't rewrite" wins, and the
+original command is passed through untouched:
+
+1. **`RTK_DISABLED=1` in the command's env prefix** — skips this one invocation entirely.
+2. **`[hooks] exclude_commands`** — regex (patterns starting with `^`) or prefix match against the command with env prefixes stripped.
+3. **Per-command fail-safe** — RTK declines any invocation it cannot reproduce exactly (see below).
+
+Reach for `exclude_commands` before `RTK_DISABLED=1`. Excluding one command
+(`exclude_commands = ["rg"]`) keeps every other saving; `RTK_DISABLED=1`
+throws all of them away.
+
+### Fail-safe passthrough
+
+RTK never emits a command it cannot run. When an invocation contains a flag or
+predicate RTK does not model, it declines to rewrite and the original command
+runs verbatim, with the real tool's exit code forwarded unchanged.
+
+Most RTK subcommands get this for free — they delegate to the underlying binary
+and only filter its output. `rtk find` is the exception: it reimplements the
+directory walk, so it explicitly checks its argument list and passes through on
+anything outside the modelled subset (`-name`, `-iname`, `-type`, `-maxdepth`,
+`-print`). Compound predicates (`-not`, `-o`), actions (`-exec`, `-delete`),
+time/size predicates (`-newer`, `-size`, `-mtime`, `-perm`, `-regex`), and any
+unrecognised flag all pass through to the system `find`.
+
+> **Known divergence.** Within its modelled subset, `rtk find` filters results
+> using `.gitignore` and skips hidden entries unless the pattern starts with `.`
+> — real `find` does neither. This is deliberate (it is where the token savings
+> come from), but it means `rtk find . -maxdepth 1 -type f` can return fewer
+> files than `find . -maxdepth 1 -type f`. Use `exclude_commands = ["find"]` if
+> you need byte-identical `find` semantics.
+
 ## Telemetry
 
 RTK sends one anonymous ping per day (23h interval). No personal data, no file paths, no command content.
