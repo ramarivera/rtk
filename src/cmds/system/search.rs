@@ -283,6 +283,19 @@ impl Engine {
         self.bin()
     }
 
+    /// Engine stderr with an rtk-level hint appended when the engine rejected a
+    /// flag. The engine's own text is preserved verbatim — see `engine_hint`.
+    fn annotate(self, stderr: &str) -> String {
+        super::engine_hint::annotate_stderr(self.label(), self.bin(), stderr)
+    }
+
+    /// Just the hint lines, for paths where the engine wrote its own stderr
+    /// straight to the terminal and reprinting it would duplicate.
+    fn hint_only(self, stderr: &str) -> Option<String> {
+        let flag = super::engine_hint::extract_unrecognized_flag(stderr)?;
+        Some(super::engine_hint::hint_lines(self.label(), self.bin(), &flag).join("\n") + "\n")
+    }
+
     /// `-n -H --null` are parse aids (NUL keeps the regroup unambiguous, #1436);
     /// `-I` skips binary noise (-a overrides).
     fn parse_flags(self) -> &'static [&'static str] {
@@ -425,6 +438,12 @@ fn run_streaming_search(
     )
     .context("search failed")?;
 
+    // Streaming already forwarded the engine's stderr, so append the hint alone
+    // rather than reprinting the error the reader has seen.
+    if let Some(hint) = engine.hint_only(&result.raw_stderr) {
+        eprint!("{hint}");
+    }
+
     timer.track(
         real_cmd,
         &format!("rtk {}", engine.label()),
@@ -453,14 +472,18 @@ fn passthrough<T: AsRef<str>>(
     }
 
     let exit_code = if stream_stdin {
-        stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
-            .context("search failed")?
-            .exit_code
+        let result = stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
+            .context("search failed")?;
+        // Streaming already forwarded stderr; append the hint alone.
+        if let Some(hint) = engine.hint_only(&result.raw_stderr) {
+            eprint!("{hint}");
+        }
+        result.exit_code
     } else {
         let result = exec_capture_stdin(&mut cmd).context("search failed")?;
         print!("{}", strip_ansi(&result.stdout));
         if !result.stderr.is_empty() {
-            eprint!("{}", result.stderr);
+            eprint!("{}", engine.annotate(&result.stderr));
         }
         result.exit_code
     };
@@ -511,7 +534,7 @@ pub fn run(
         let result = exec_capture(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {
-            eprint!("{}", result.stderr);
+            eprint!("{}", engine.annotate(&result.stderr));
         }
         return Ok(result.exit_code);
     }
@@ -571,7 +594,7 @@ pub fn run(
     }
 
     if !result.stderr.is_empty() {
-        eprint!("{}", result.stderr);
+        eprint!("{}", engine.annotate(&result.stderr));
     }
 
     if result.stdout.trim().is_empty() {
