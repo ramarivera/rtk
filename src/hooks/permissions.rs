@@ -180,9 +180,11 @@ fn get_settings_paths() -> Vec<PathBuf> {
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_JSON));
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
     }
-    if let Some(home) = dirs::home_dir() {
-        paths.push(home.join(CLAUDE_DIR).join(SETTINGS_JSON));
-        paths.push(home.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
+    // Honour $CLAUDE_CONFIG_DIR — users who relocate Claude's config (e.g. to
+    // ~/.config/claude) must not have RTK read a stale ~/.claude instead.
+    if let Ok(claude_dir) = super::init::resolve_claude_dir() {
+        paths.push(claude_dir.join(SETTINGS_JSON));
+        paths.push(claude_dir.join(SETTINGS_LOCAL_JSON));
     }
 
     paths
@@ -475,6 +477,39 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: with $CLAUDE_CONFIG_DIR set, the global settings paths must
+    /// point at that directory, not at a stale ~/.claude.
+    #[test]
+    fn settings_paths_follow_claude_config_dir() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path().join("config-claude");
+        std::fs::create_dir_all(&custom).unwrap();
+
+        let orig = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &custom);
+        let paths = get_settings_paths();
+        match orig {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+
+        assert!(
+            paths.contains(&custom.join(SETTINGS_JSON)),
+            "expected {:?} in {paths:?}",
+            custom.join(SETTINGS_JSON)
+        );
+        assert!(paths.contains(&custom.join(SETTINGS_LOCAL_JSON)));
+        if let Some(home) = dirs::home_dir() {
+            assert!(
+                !paths.contains(&home.join(CLAUDE_DIR).join(SETTINGS_JSON)),
+                "must not fall back to ~/.claude when CLAUDE_CONFIG_DIR is set"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_bash_pattern() {

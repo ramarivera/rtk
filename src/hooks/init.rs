@@ -1233,10 +1233,10 @@ fn run_default_mode(
 fn migrate_old_hook_script(ctx: InitContext) {
     let InitContext { verbose, dry_run } = ctx;
     if let Some(home) = dirs::home_dir() {
-        let old_hook = home
-            .join(CLAUDE_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(REWRITE_HOOK_FILE);
+        // Honour $CLAUDE_CONFIG_DIR: the legacy script lives beside the *active*
+        // Claude config, which is not necessarily ~/.claude.
+        let claude_dir = resolve_claude_dir().unwrap_or_else(|_| home.join(CLAUDE_DIR));
+        let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
         if old_hook.exists() {
             if dry_run {
                 println!(
@@ -1261,10 +1261,7 @@ fn migrate_old_hook_script(ctx: InitContext) {
             }
         }
         // Remove legacy hash file
-        let hash_file = home
-            .join(CLAUDE_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(".rtk-hook.sha256");
+        let hash_file = claude_dir.join(HOOKS_SUBDIR).join(".rtk-hook.sha256");
         if hash_file.exists() {
             if dry_run {
                 println!(
