@@ -1,5 +1,32 @@
 name: Update Next Release PR
 
+# SECURITY — why `pull_request_target` is used here, and what keeps it safe.
+#
+# `pull_request_target` runs with repository secrets and a writable token, which
+# is what makes the classic "pwn request" possible. That attack needs the
+# workflow to *check out and execute* code from the untrusted PR head. This
+# workflow does none of that, and the invariants below MUST hold — breaking any
+# one of them reintroduces the hole:
+#
+#   1. NO `actions/checkout`, ever. This workflow has zero `uses:` steps and
+#      never fetches PR head content. If you need the PR's code, put it in a
+#      separate `pull_request` workflow instead.
+#   2. NO build, test or script from the repo tree is executed — only `gh`,
+#      `jq` and coreutils from the runner image.
+#   3. Attacker-controlled fields (PR title/body) reach the script ONLY through
+#      `env:`, never interpolated into `run:` via `${{ }}`, and every use is
+#      double-quoted. `awk` reads the entry through ENVIRON rather than `-v`.
+#      This is the documented anti-injection pattern.
+#   4. `permissions:` stays minimal: `contents: read` plus the
+#      `pull-requests: write` this job actually needs. Never `contents: write`.
+#
+# The trigger also requires `merged == true` on a PR into `develop`, and merging
+# requires write access, so an outside contributor cannot reach it at all.
+#
+# `pull_request` is not a workable substitute: fork PRs get a read-only token
+# under that trigger, so `gh pr edit` would fail and the release note would be
+# dropped silently. The repository guard below is the fork-side mitigation.
+
 on:
   pull_request_target:
     types: [closed]
@@ -11,7 +38,11 @@ permissions:
 
 jobs:
   update-next-release:
-    if: github.event.pull_request.merged == true
+    # Upstream-only: forks do not run the Next Release process, so this never
+    # executes with a fork's secrets.
+    if: >-
+      github.repository == 'rtk-ai/rtk' &&
+      github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Update Next Release PR
