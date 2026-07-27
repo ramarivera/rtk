@@ -250,11 +250,16 @@ enum Commands {
         path: PathBuf,
     },
 
-    /// Show environment variables (filtered)
+    /// Show environment variables (filtered, secrets masked)
     Env {
         /// Filter by name (e.g. PATH, AWS)
         #[arg(short, long)]
         filter: Option<String>,
+
+        /// Reveal values that are masked by default. Prints live credentials
+        /// to stdout — never use this in an agent transcript or shared session.
+        #[arg(long)]
+        show_all: bool,
     },
 
     /// Find files with compact tree output (accepts native find flags like -name, -type)
@@ -1868,8 +1873,8 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Env { filter } => {
-            env_cmd::run(filter.as_deref(), cli.verbose)?;
+        Commands::Env { filter, show_all } => {
+            env_cmd::run(filter.as_deref(), show_all, cli.verbose)?;
             0
         }
 
