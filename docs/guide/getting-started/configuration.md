@@ -179,6 +179,41 @@ unrecognised flag all pass through to the system `find`.
 > files than `find . -maxdepth 1 -type f`. Use `exclude_commands = ["find"]` if
 > you need byte-identical `find` semantics.
 
+## Secret masking in `rtk env`
+
+`rtk env` masks values whose variable name looks secret-bearing — anything
+containing `key`, `secret`, `token`, `password`, `auth`, `credential`, `jwt`,
+`session`, `cookie`, `signature`, `cert`, `dsn`, `webhook`, `bearer` and
+similar, matched case-insensitively:
+
+```console
+$ rtk env --filter API
+Tools:
+  ANTHROPIC_API_KEY=sk****4a
+  OPENAI_API_KEY=sk****9f
+```
+
+The variable is still *listed* — masking is not suppression, so an agent can
+tell that a credential is configured without learning its value. Two leading
+and two trailing characters are kept so you can distinguish two keys at a
+glance; values of four characters or fewer are replaced entirely.
+
+To reveal the real values, pass `--show-all` explicitly:
+
+```bash
+rtk env --filter API --show-all      # prints live credentials — human eyes only
+```
+
+> **Known divergence — deliberate.** Upstream removed this masking in
+> `fix(env): clean up feature from secrets rewrite`. This fork keeps it, and
+> keeps it **on by default**. `rtk env` is run by agents, and its output lands
+> verbatim in a transcript that is stored, shared and replayed; a development
+> shell routinely holds dozens of live credentials, which makes an unmasked
+> `rtk env` a one-command credential dump. The pattern list is intentionally
+> broad: a false positive costs one re-run with `--show-all`, a false negative
+> leaks a key that then has to be rotated. There is no config setting to
+> disable masking — only the per-invocation flag, which a human has to type.
+
 ## Telemetry
 
 RTK sends one anonymous ping per day (23h interval). No personal data, no file paths, no command content.
