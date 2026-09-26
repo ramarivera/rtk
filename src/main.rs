@@ -1842,50 +1842,28 @@ fn merge_pnpm_args_os(
         .collect()
 }
 
-/// Validate that pnpm filters are only used in the global context, not before subcommands like tsc.
-fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<String> {
-    // Check if this is a Build or Typecheck command with filters
-    match command {
-        PnpmCommands::Typecheck { .. } => {
-            // FIXME: if filters are present, we should find out which workspaces are selected before running rtk dedicated commands
-            if !filters.is_empty() {
-                let cmd_name = match command {
-                    PnpmCommands::Typecheck { .. } => "tsc",
-                    _ => unreachable!(),
-                };
-                let msg = format!(
-                    "[rtk] warning: --filter is not yet supported for pnpm {}, filters preceding the subcommand will be ignored",
-                    cmd_name
-                );
-                return Some(msg);
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-/// Warn when pnpm global flags (`-r`/`-w`) are dropped for subcommands that don't
-/// forward them (Typecheck delegates to `tsc` and ignores them), mirroring the
-/// `--filter` warning in `validate_pnpm_filters`. Not reachable via the hook
-/// rewriter (`typecheck` isn't a rewritten pnpm subcommand) but possible manually.
-fn validate_pnpm_globals(
+/// A `pnpm typecheck` that selects workspaces (`--filter`, `-r`, `-w`) must run
+/// the selected packages' own `typecheck` scripts. The dedicated tsc filter runs
+/// in the current directory, so dropping the selectors there typechecks the
+/// wrong project and can report a false pass (e.g. `No errors found` for a
+/// package whose `tsc -b` fails). Returns raw passthrough args when any
+/// workspace selector is present.
+fn workspace_typecheck_passthrough_args(
+    filters: &[String],
     recursive: bool,
     workspace_root: bool,
     command: &PnpmCommands,
-) -> Option<String> {
+) -> Option<Vec<OsString>> {
     match command {
-        PnpmCommands::Typecheck { .. } if recursive || workspace_root => {
-            let mut flags = Vec::new();
-            if recursive {
-                flags.push("-r");
-            }
-            if workspace_root {
-                flags.push("-w");
-            }
-            Some(format!(
-                "[rtk] warning: pnpm tsc does not support {} — ignored",
-                flags.join(", ")
+        PnpmCommands::Typecheck { args } if !filters.is_empty() || recursive || workspace_root => {
+            let subcommand_args: Vec<OsString> = std::iter::once(OsString::from("typecheck"))
+                .chain(args.iter().map(OsString::from))
+                .collect();
+            Some(merge_pnpm_args_os(
+                filters,
+                recursive,
+                workspace_root,
+                &subcommand_args,
             ))
         }
         _ => None,
@@ -2314,35 +2292,35 @@ fn run_cli() -> Result<i32> {
             workspace_root,
             command,
         } => {
-            // Warns user if filters are used with unsupported subcommands like typecheck
-            if let Some(warning) = validate_pnpm_filters(&filter, &command) {
-                eprintln!("{}", warning);
-            }
-            if let Some(warning) = validate_pnpm_globals(recursive, workspace_root, &command) {
-                eprintln!("{}", warning);
-            }
-
-            match command {
-                PnpmCommands::List { depth, args } => pnpm_cmd::run(
-                    pnpm_cmd::PnpmCommand::List { depth },
-                    &merge_pnpm_args(&filter, recursive, workspace_root, &args),
-                    cli.verbose,
-                )?,
-                PnpmCommands::Outdated { args } => pnpm_cmd::run(
-                    pnpm_cmd::PnpmCommand::Outdated,
-                    &merge_pnpm_args(&filter, recursive, workspace_root, &args),
-                    cli.verbose,
-                )?,
-                PnpmCommands::Install { args } => pnpm_cmd::run(
-                    pnpm_cmd::PnpmCommand::Install,
-                    &merge_pnpm_args(&filter, recursive, workspace_root, &args),
-                    cli.verbose,
-                )?,
-                PnpmCommands::Typecheck { args } => tsc_cmd::run(Some("pnpm"), &args, cli.verbose)?,
-                PnpmCommands::Other(args) => pnpm_cmd::run_passthrough(
-                    &merge_pnpm_args_os(&filter, recursive, workspace_root, &args),
-                    cli.verbose,
-                )?,
+            if let Some(passthrough) =
+                workspace_typecheck_passthrough_args(&filter, recursive, workspace_root, &command)
+            {
+                pnpm_cmd::run_passthrough(&passthrough, cli.verbose)?
+            } else {
+                match command {
+                    PnpmCommands::List { depth, args } => pnpm_cmd::run(
+                        pnpm_cmd::PnpmCommand::List { depth },
+                        &merge_pnpm_args(&filter, recursive, workspace_root, &args),
+                        cli.verbose,
+                    )?,
+                    PnpmCommands::Outdated { args } => pnpm_cmd::run(
+                        pnpm_cmd::PnpmCommand::Outdated,
+                        &merge_pnpm_args(&filter, recursive, workspace_root, &args),
+                        cli.verbose,
+                    )?,
+                    PnpmCommands::Install { args } => pnpm_cmd::run(
+                        pnpm_cmd::PnpmCommand::Install,
+                        &merge_pnpm_args(&filter, recursive, workspace_root, &args),
+                        cli.verbose,
+                    )?,
+                    PnpmCommands::Typecheck { args } => {
+                        tsc_cmd::run(Some("pnpm"), &args, cli.verbose)?
+                    }
+                    PnpmCommands::Other(args) => pnpm_cmd::run_passthrough(
+                        &merge_pnpm_args_os(&filter, recursive, workspace_root, &args),
+                        cli.verbose,
+                    )?,
+                }
             }
         }
 
@@ -4372,17 +4350,19 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_pnpm_globals_warns_on_typecheck() {
+    fn test_workspace_typecheck_passes_through_global_selectors() {
         let cmd = PnpmCommands::Typecheck { args: vec![] };
-        assert!(validate_pnpm_globals(true, false, &cmd).is_some());
-        assert!(validate_pnpm_globals(false, true, &cmd).is_some());
-        // Both flags at once: single warning naming both.
-        let both = validate_pnpm_globals(true, true, &cmd).unwrap();
-        assert!(both.contains("-r") && both.contains("-w"));
-        assert!(validate_pnpm_globals(false, false, &cmd).is_none());
-        // Non-typecheck subcommands forward the flags → no warning.
+        assert_eq!(
+            workspace_typecheck_passthrough_args(&[], true, false, &cmd).unwrap(),
+            vec![OsString::from("-r"), OsString::from("typecheck")]
+        );
+        assert_eq!(
+            workspace_typecheck_passthrough_args(&[], false, true, &cmd).unwrap(),
+            vec![OsString::from("-w"), OsString::from("typecheck")]
+        );
+        assert!(workspace_typecheck_passthrough_args(&[], false, false, &cmd).is_none());
         let install = PnpmCommands::Install { args: vec![] };
-        assert!(validate_pnpm_globals(true, true, &install).is_none());
+        assert!(workspace_typecheck_passthrough_args(&[], true, true, &install).is_none());
     }
 
     #[test]
@@ -4460,10 +4440,11 @@ mod tests {
             Commands::Pnpm {
                 filter, command, ..
             } => {
-                let warning = validate_pnpm_filters(&filter, &command);
+                let passthrough =
+                    workspace_typecheck_passthrough_args(&filter, false, false, &command);
 
                 assert!(filter.is_empty());
-                assert!(warning.is_none())
+                assert!(passthrough.is_none())
             }
             _ => panic!("Expected Pnpm Build command"),
         }
@@ -4489,12 +4470,23 @@ mod tests {
             Commands::Pnpm {
                 filter, command, ..
             } => {
-                let warning = validate_pnpm_filters(&filter, &command).unwrap();
+                let passthrough =
+                    workspace_typecheck_passthrough_args(&filter, false, false, &command).unwrap();
 
                 assert_eq!(filter, vec!["@app1", "@app2"]);
+                // Selectors are kept and the workspaces' own `typecheck` scripts
+                // run, instead of a bare tsc in the current directory.
                 assert_eq!(
-                    warning,
-                    "[rtk] warning: --filter is not yet supported for pnpm tsc, filters preceding the subcommand will be ignored"
+                    passthrough,
+                    vec![
+                        OsString::from("--filter=@app1"),
+                        OsString::from("--filter=@app2"),
+                        OsString::from("typecheck"),
+                        OsString::from("--filter"),
+                        OsString::from("@app3"),
+                        OsString::from("--filter"),
+                        OsString::from("@app4"),
+                    ]
                 )
             }
             _ => panic!("Expected Pnpm Build command"),
